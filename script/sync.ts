@@ -16,14 +16,16 @@
 import { $ } from "bun"
 import path from "path"
 
-// Simple JSON5 parser for our limited use case (handles comments and trailing commas)
+// Simple JSON5 parser for our limited use case (handles comments, trailing commas, unquoted keys)
 function parseJson5(text: string): unknown {
-  // Remove single-line comments
+  // Remove single-line comments (but not within strings)
   let cleaned = text.replace(/\/\/.*$/gm, "")
   // Remove multi-line comments
   cleaned = cleaned.replace(/\/\*[\s\S]*?\*\//g, "")
   // Remove trailing commas before } or ]
   cleaned = cleaned.replace(/,(\s*[}\]])/g, "$1")
+  // Quote unquoted keys (word characters followed by :)
+  cleaned = cleaned.replace(/(\s*)(\w+)(\s*:)/g, '$1"$2"$3')
   return JSON.parse(cleaned)
 }
 
