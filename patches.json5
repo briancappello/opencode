@@ -1,0 +1,18 @@
+{
+  // Patches to cherry-pick on top of each upstream release.
+  // Each entry references an upstream PR (merged or open).
+  // The sync script will fetch the PR branch and cherry-pick its commits.
+  patches: [
+    { pr: 6164, description: "Add built-in markdown table formatting" },
+  ],
+
+  // Optional: per-version overrides.
+  // Use "add" to include extra patches for a specific version.
+  // Use "skip" to exclude default patches that conflict with that version.
+  overrides: {
+    // "0.3.17": {
+    //   add: [{ pr: 99999, description: "Backport fix for 0.3.17 only" }],
+    //   skip: [6164],
+    // },
+  },
+}

@@ -132,10 +132,12 @@ export namespace Installation {
     let cmd
     switch (method) {
       case "curl":
-        cmd = $`curl -fsSL https://opencode.ai/install | bash`.env({
-          ...process.env,
-          VERSION: target,
-        })
+        cmd = $`curl -fsSL https://raw.githubusercontent.com/briancappello/opencode/make-it-mine/install.sh | bash`.env(
+          {
+            ...process.env,
+            VERSION: target,
+          },
+        )
         break
       case "npm":
         cmd = $`npm install -g opencode-ai@${target}`
@@ -251,7 +253,7 @@ export namespace Installation {
         .then((data: any) => data.version)
     }
 
-    return fetch("https://api.github.com/repos/anomalyco/opencode/releases/latest")
+    return fetch("https://api.github.com/repos/briancappello/opencode/releases/latest")
       .then((res) => {
         if (!res.ok) throw new Error(res.statusText)
         return res.json()

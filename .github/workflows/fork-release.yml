@@ -1,0 +1,235 @@
+name: fork-release
+
+on:
+  push:
+    branches:
+      - make-it-mine
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "Base upstream tag (e.g. v0.3.17)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: make-it-mine
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Configure git identity
+        run: |
+          git config --global user.email "bot@opencode.ai"
+          git config --global user.name "opencode"
+
+      - name: Run unit tests
+        run: bun turbo test
+
+  build:
+    name: Build CLI
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: make-it-mine
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Determine version
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+        run: |
+          # Get upstream tag from input or detect from current commit
+          if [ -n "$INPUT_UPSTREAM_TAG" ]; then
+            UPSTREAM_TAG="$INPUT_UPSTREAM_TAG"
+          else
+            # Try to find the most recent upstream tag in history
+            git remote add upstream https://github.com/anomalyco/opencode.git 2>/dev/null || true
+            git fetch upstream --tags
+            UPSTREAM_TAG=$(git describe --tags --abbrev=0 --match "v*" 2>/dev/null || echo "v0.0.0")
+          fi
+          BASE_VERSION="${UPSTREAM_TAG#v}"
+          echo "Base upstream version: $BASE_VERSION"
+
+          # Count existing releases with this base version
+          EXISTING=$(gh release list --json tagName -q '.[].tagName' | grep "^v${BASE_VERSION}+brian\." | wc -l || echo "0")
+          PATCH_NUM=$((EXISTING + 1))
+
+          VERSION="${BASE_VERSION}+brian.${PATCH_NUM}"
+          TAG="v${VERSION}"
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Will create release: $TAG"
+
+      - name: Build CLI binary
+        env:
+          OPENCODE_VERSION: ${{ steps.version.outputs.version }}
+          OPENCODE_CHANNEL: latest
+        run: |
+          cd packages/opencode
+          bun script/build.ts --single
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode-cli
+          path: packages/opencode/dist/
+
+  release:
+    name: Create release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: make-it-mine
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: opencode-cli
+          path: dist/
+
+      - name: Read patches.json5
+        id: patches
+        run: |
+          # Extract PR numbers for release notes
+          if [ -f patches.json5 ]; then
+            PRS=$(grep -oP '"pr":\s*\K\d+' patches.json5 | tr '\n' ',' | sed 's/,$//')
+            echo "prs=$PRS" >> $GITHUB_OUTPUT
+          else
+            echo "prs=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.build.outputs.version }}
+          TAG: ${{ needs.build.outputs.tag }}
+          PRS: ${{ steps.patches.outputs.prs }}
+        run: |
+          # Prepare release notes
+          BASE_VERSION=$(echo "$VERSION" | sed 's/+.*//')
+          NOTES="## Fork Release
+
+          Based on upstream \`v${BASE_VERSION}\`
+
+          ### Patches applied
+          "
+          if [ -n "$PRS" ]; then
+            for PR in $(echo "$PRS" | tr ',' ' '); do
+              NOTES="${NOTES}
+          - PR #${PR}"
+            done
+          else
+            NOTES="${NOTES}
+          No additional patches (fork customizations only)"
+          fi
+
+          NOTES="${NOTES}
+
+          ### Installation
+
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/make-it-mine/install.sh | bash
+          \`\`\`
+
+          ### Changes from upstream
+          - Auto-updater points to this fork's releases
+          - Custom install script URL
+          "
+
+          # Find the built binary
+          BINARY=$(find dist -name "opencode" -o -name "opencode.exe" | head -1)
+          if [ -z "$BINARY" ]; then
+            # Look for tar.gz or zip
+            BINARY=$(find dist -name "*.tar.gz" -o -name "*.zip" | head -1)
+          fi
+
+          # Package if needed
+          cd dist
+          for dir in */; do
+            if [ -d "$dir" ]; then
+              NAME="${dir%/}"
+              if [[ "$NAME" == *"linux"* ]]; then
+                tar -czf "${NAME}.tar.gz" -C "$NAME/bin" .
+              else
+                (cd "$NAME/bin" && zip -r "../../${NAME}.zip" .)
+              fi
+            fi
+          done
+          cd ..
+
+          # Create release
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes "$NOTES" \
+            dist/*.tar.gz dist/*.zip 2>/dev/null || \
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes "$NOTES"
+
+          echo "Release created: $TAG"
+
+  notify-failure:
+    name: Open issue on failure
+    needs: [test, build, release]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TITLE="Release failed"
+          BODY="## Release Failure Report
+
+          **Workflow run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          ### Failed jobs
+          - Test: ${{ needs.test.result }}
+          - Build: ${{ needs.build.result }}
+          - Release: ${{ needs.release.result }}
+
+          ### Next steps
+          1. Review the workflow logs
+          2. Fix the failing tests or build issues
+          3. Push fixes to make-it-mine branch
+          4. The release workflow will run again automatically
+          "
+
+          gh issue create --title "$TITLE" --body "$BODY" --label "release-failure"
