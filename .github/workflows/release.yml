@@ -129,13 +129,35 @@ jobs:
           git config --global user.email "actions@github.com"
           git config --global user.name "github-actions[bot]"
 
+      - name: Apply fork customizations
+        working-directory: upstream
+        run: |
+          # Update installation URLs to point to this fork
+          FORK_REPO="${{ github.repository }}"
+          echo "Patching installation URLs to use $FORK_REPO..."
+
+          # Patch install.sh
+          sed -i "s|REPO=\"anomalyco/opencode\"|REPO=\"${FORK_REPO}\"|g" install.sh
+          sed -i "s|REPO=\"sst/opencode\"|REPO=\"${FORK_REPO}\"|g" install.sh
+
+          # Patch installation/index.ts for upgrade URLs
+          INSTALL_FILE="packages/opencode/src/installation/index.ts"
+          sed -i "s|anomalyco/opencode/releases|${FORK_REPO}/releases|g" "$INSTALL_FILE"
+          sed -i "s|sst/opencode/releases|${FORK_REPO}/releases|g" "$INSTALL_FILE"
+          sed -i "s|anomalyco/opencode/make-it-mine|${FORK_REPO}/make-it-mine|g" "$INSTALL_FILE"
+          sed -i "s|sst/opencode/make-it-mine|${FORK_REPO}/make-it-mine|g" "$INSTALL_FILE"
+
+          git add -A
+          git commit -m "fork: update URLs to ${FORK_REPO}" --allow-empty
+
       - name: Apply patches from patches.json5
         working-directory: upstream
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Parse patches.json5 (extract PR numbers)
-          PATCHES=$(grep -oP '"pr":\s*\K\d+' ../fork/patches.json5 || echo "")
+          # Parse patches.json5 (extract PR numbers, ignoring comments)
+          # Remove // comments, then extract pr: values
+          PATCHES=$(sed 's|//.*||g' ../fork/patches.json5 | grep -oE 'pr:\s*[0-9]+' | grep -oE '[0-9]+' || echo "")
 
           if [ -z "$PATCHES" ]; then
             echo "No patches to apply"
@@ -267,8 +289,8 @@ jobs:
           TAG: ${{ needs.check.outputs.tag }}
           UPSTREAM_TAG: ${{ needs.check.outputs.upstream_tag }}
         run: |
-          # Read patches for release notes
-          PRS=$(grep -oP '"pr":\s*\K\d+' patches.json5 | tr '\n' ' ' || echo "")
+          # Read patches for release notes (strip comments first)
+          PRS=$(sed 's|//.*||g' patches.json5 | grep -oE 'pr:\s*[0-9]+' | grep -oE '[0-9]+' | tr '\n' ' ' || echo "")
 
           # Prepare release notes
           NOTES="## Fork Release
