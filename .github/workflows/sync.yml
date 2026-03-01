@@ -115,8 +115,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           UPSTREAM_TAG: ${{ needs.check.outputs.upstream_tag }}
+          INPUT_FORCE: ${{ inputs.force }}
         run: |
-          bun script/sync.ts --tag "$UPSTREAM_TAG"
+          FORCE_FLAG=""
+          if [ "$INPUT_FORCE" = "true" ]; then
+            FORCE_FLAG="--force"
+          fi
+          bun script/sync.ts --tag "$UPSTREAM_TAG" $FORCE_FLAG
 
       - name: Push make-it-mine branch
         if: steps.sync.outputs.success == 'true'
