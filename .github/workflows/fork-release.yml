@@ -65,10 +65,14 @@ jobs:
           if [ -n "$INPUT_UPSTREAM_TAG" ]; then
             UPSTREAM_TAG="$INPUT_UPSTREAM_TAG"
           else
-            # Try to find the most recent upstream tag in history
+            # Fetch upstream tags and find the latest semver tag (excludes +brian suffix)
             git remote add upstream https://github.com/anomalyco/opencode.git 2>/dev/null || true
             git fetch upstream --tags
-            UPSTREAM_TAG=$(git describe --tags --abbrev=0 --match "v*" 2>/dev/null || echo "v0.0.0")
+            # Get latest upstream tag that matches pure semver (no +suffix)
+            UPSTREAM_TAG=$(git tag -l "v*" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+            if [ -z "$UPSTREAM_TAG" ]; then
+              UPSTREAM_TAG="v0.0.0"
+            fi
           fi
           BASE_VERSION="${UPSTREAM_TAG#v}"
           echo "Base upstream version: $BASE_VERSION"
