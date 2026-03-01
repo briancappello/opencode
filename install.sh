@@ -5,7 +5,19 @@ set -eo pipefail
 # Installs the latest release from GitHub Releases
 
 REPO="briancappello/opencode"
-INSTALL_DIR="${HOME}/.local/bin"
+
+# Installation directory priority (matching upstream):
+# 1. $OPENCODE_INSTALL_DIR - Custom installation directory
+# 2. $XDG_BIN_DIR - XDG Base Directory Specification compliant path
+# 3. $HOME/.opencode/bin - Default (matches upstream install location)
+if [[ -n "${OPENCODE_INSTALL_DIR:-}" ]]; then
+  INSTALL_DIR="$OPENCODE_INSTALL_DIR"
+elif [[ -n "${XDG_BIN_DIR:-}" ]]; then
+  INSTALL_DIR="$XDG_BIN_DIR"
+else
+  INSTALL_DIR="${HOME}/.opencode/bin"
+fi
+
 tmp_dir=""
 
 cleanup() {
@@ -47,15 +59,18 @@ detect_platform() {
 
 # Get the latest release version from GitHub
 get_latest_version() {
-  local version
+  local response version
   if command -v curl &>/dev/null; then
-    version=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+    response=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")
   elif command -v wget &>/dev/null; then
-    version=$(wget -qO- "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+    response=$(wget -qO- "https://api.github.com/repos/${REPO}/releases/latest")
   else
     error "Neither curl nor wget found. Please install one of them."
     exit 1
   fi
+
+  # Extract tag_name from JSON - handle the + character in version
+  version=$(echo "$response" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
 
   if [[ -z "$version" ]]; then
     error "Failed to fetch latest version from GitHub"
@@ -132,6 +147,19 @@ install() {
 
   info "Installed to: ${INSTALL_DIR}/opencode"
 
+  # Check for other opencode installations that might shadow this one
+  local other_opencode
+  other_opencode=$(which opencode 2>/dev/null || true)
+  if [[ -n "$other_opencode" && "$other_opencode" != "${INSTALL_DIR}/opencode" ]]; then
+    warn "Another opencode installation found at: $other_opencode"
+    warn "This may shadow the version just installed."
+    echo ""
+    echo "To fix, either:"
+    echo "  1. Remove the other installation: rm \"$other_opencode\""
+    echo "  2. Ensure ${INSTALL_DIR} comes first in your PATH"
+    echo ""
+  fi
+
   # Check if INSTALL_DIR is in PATH
   if [[ ":$PATH:" != *":${INSTALL_DIR}:"* ]]; then
     warn "${INSTALL_DIR} is not in your PATH"
@@ -139,13 +167,13 @@ install() {
     echo "Add it to your shell config:"
     echo ""
     echo "  # For bash (add to ~/.bashrc):"
-    echo "  export PATH=\"\$PATH:${INSTALL_DIR}\""
+    echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
     echo ""
     echo "  # For zsh (add to ~/.zshrc):"
-    echo "  export PATH=\"\$PATH:${INSTALL_DIR}\""
+    echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
     echo ""
     echo "  # For fish (add to ~/.config/fish/config.fish):"
-    echo "  set -gx PATH \$PATH ${INSTALL_DIR}"
+    echo "  set -gx PATH ${INSTALL_DIR} \$PATH"
     echo ""
   fi
 

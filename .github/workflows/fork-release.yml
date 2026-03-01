@@ -128,8 +128,8 @@ jobs:
           OPENCODE_VERSION: ${{ needs.version.outputs.version }}
           OPENCODE_CHANNEL: latest
         run: |
+          echo "Building with OPENCODE_VERSION=$OPENCODE_VERSION"
           cd packages/opencode
-          # Build for all targets, the build script handles cross-compilation
           bun script/build.ts
 
       - name: Package artifacts
