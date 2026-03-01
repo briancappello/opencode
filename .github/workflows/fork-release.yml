@@ -78,7 +78,9 @@ jobs:
           echo "Base upstream version: $BASE_VERSION"
 
           # Count existing releases with this base version
-          EXISTING=$(gh release list --json tagName -q '.[].tagName' | grep "^v${BASE_VERSION}+brian\." | wc -l || echo "0")
+          EXISTING=$(gh release list --json tagName -q '.[].tagName' | grep -c "v${BASE_VERSION}+brian\." 2>/dev/null || true)
+          EXISTING=${EXISTING:-0}
+          EXISTING=$(echo "$EXISTING" | tr -d '[:space:]')
           PATCH_NUM=$((EXISTING + 1))
 
           VERSION="${BASE_VERSION}+brian.${PATCH_NUM}"
