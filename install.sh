@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eo pipefail
 
 # Fork install script for briancappello/opencode
 # Installs the latest release from GitHub Releases
 
 REPO="briancappello/opencode"
 INSTALL_DIR="${HOME}/.local/bin"
+tmp_dir=""
+
+cleanup() {
+  if [[ -n "$tmp_dir" && -d "$tmp_dir" ]]; then
+    rm -rf "$tmp_dir"
+  fi
+}
+trap cleanup EXIT
 
 # Colors
 RED='\033[0;31m'
@@ -89,7 +97,6 @@ install() {
 
   # Create temp directory
   tmp_dir=$(mktemp -d)
-  trap 'rm -rf "$tmp_dir"' EXIT
 
   # Download
   if command -v curl &>/dev/null; then

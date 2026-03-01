@@ -40,8 +40,8 @@ jobs:
       - name: Run unit tests
         run: bun turbo test
 
-  build:
-    name: Build CLI
+  version:
+    name: Determine version
     needs: test
     runs-on: ubuntu-latest
     outputs:
@@ -54,12 +54,6 @@ jobs:
           ref: make-it-mine
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-
-      - name: Install dependencies
-        run: bun install
 
       - name: Determine version
         id: version
@@ -90,23 +84,71 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "Will create release: $TAG"
 
+  build:
+    name: Build CLI (${{ matrix.target }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            os: ubuntu-latest
+          - target: linux-arm64
+            os: ubuntu-latest
+          - target: darwin-arm64
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: make-it-mine
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
       - name: Build CLI binary
         env:
-          OPENCODE_VERSION: ${{ steps.version.outputs.version }}
+          OPENCODE_VERSION: ${{ needs.version.outputs.version }}
           OPENCODE_CHANNEL: latest
         run: |
           cd packages/opencode
-          bun script/build.ts --single
+          # Build for all targets, the build script handles cross-compilation
+          bun script/build.ts
+
+      - name: Package artifacts
+        run: |
+          cd packages/opencode/dist
+          for dir in */; do
+            if [ -d "$dir" ]; then
+              NAME="${dir%/}"
+              # Only package the target we're responsible for
+              if [[ "$NAME" == *"${{ matrix.target }}"* ]]; then
+                if [[ "$NAME" == *"linux"* ]]; then
+                  tar -czf "${NAME}.tar.gz" -C "$NAME/bin" .
+                else
+                  (cd "$NAME/bin" && zip -r "../../${NAME}.zip" .)
+                fi
+              fi
+            fi
+          done
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: opencode-cli
-          path: packages/opencode/dist/
+          name: opencode-${{ matrix.target }}
+          path: |
+            packages/opencode/dist/*.tar.gz
+            packages/opencode/dist/*.zip
 
   release:
     name: Create release
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -115,11 +157,15 @@ jobs:
           ref: make-it-mine
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download build artifacts
+      - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
-          name: opencode-cli
           path: dist/
+          pattern: opencode-*
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist/
 
       - name: Read patches.json5
         id: patches
@@ -135,8 +181,8 @@ jobs:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ needs.build.outputs.version }}
-          TAG: ${{ needs.build.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+          TAG: ${{ needs.version.outputs.tag }}
           PRS: ${{ steps.patches.outputs.prs }}
         run: |
           # Prepare release notes
@@ -170,28 +216,7 @@ jobs:
           - Custom install script URL
           "
 
-          # Find the built binary
-          BINARY=$(find dist -name "opencode" -o -name "opencode.exe" | head -1)
-          if [ -z "$BINARY" ]; then
-            # Look for tar.gz or zip
-            BINARY=$(find dist -name "*.tar.gz" -o -name "*.zip" | head -1)
-          fi
-
-          # Package if needed
-          cd dist
-          for dir in */; do
-            if [ -d "$dir" ]; then
-              NAME="${dir%/}"
-              if [[ "$NAME" == *"linux"* ]]; then
-                tar -czf "${NAME}.tar.gz" -C "$NAME/bin" .
-              else
-                (cd "$NAME/bin" && zip -r "../../${NAME}.zip" .)
-              fi
-            fi
-          done
-          cd ..
-
-          # Create release
+          # Create release with all artifacts
           gh release create "$TAG" \
             --title "$TAG" \
             --notes "$NOTES" \
@@ -204,7 +229,7 @@ jobs:
 
   notify-failure:
     name: Open issue on failure
-    needs: [test, build, release]
+    needs: [test, version, build, release]
     if: failure()
     runs-on: ubuntu-latest
     steps:
@@ -222,6 +247,7 @@ jobs:
 
           ### Failed jobs
           - Test: ${{ needs.test.result }}
+          - Version: ${{ needs.version.result }}
           - Build: ${{ needs.build.result }}
           - Release: ${{ needs.release.result }}
 
