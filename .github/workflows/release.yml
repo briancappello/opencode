@@ -1,0 +1,331 @@
+name: release
+
+on:
+  push:
+    branches:
+      - make-it-mine
+    paths:
+      - "patches.json5"
+  schedule:
+    # Run daily at 8:00 UTC
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag to build from (default: latest)"
+        required: false
+        type: string
+      force:
+        description: "Force release even if already up-to-date"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  check:
+    name: Check for updates
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+      upstream_tag: ${{ steps.check.outputs.upstream_tag }}
+      version: ${{ steps.check.outputs.version }}
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure upstream remote
+        run: |
+          git remote add upstream https://github.com/anomalyco/opencode.git || true
+          git fetch upstream --tags
+
+      - name: Check for updates
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_FORCE: ${{ inputs.force }}
+        run: |
+          # Get target upstream tag
+          if [ -n "$INPUT_TAG" ]; then
+            UPSTREAM_TAG="$INPUT_TAG"
+          else
+            UPSTREAM_TAG=$(git tag -l "v*" --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          fi
+          echo "upstream_tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
+          echo "Latest upstream tag: $UPSTREAM_TAG"
+
+          # Get latest fork release
+          FORK_RELEASE=$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || echo "")
+          echo "Latest fork release: $FORK_RELEASE"
+
+          # Extract base version from fork release (strip +brian.N suffix)
+          FORK_BASE=$(echo "$FORK_RELEASE" | sed 's/+.*//')
+          echo "Fork base version: $FORK_BASE"
+
+          # Determine if release is needed
+          if [ "$INPUT_FORCE" = "true" ]; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "Forced release requested"
+          elif [ -z "$FORK_RELEASE" ]; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "No fork releases exist, release needed"
+          elif [ "$FORK_BASE" != "$UPSTREAM_TAG" ]; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "New upstream tag detected, release needed"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "patches.json5 changed, release needed"
+          else
+            echo "should_release=false" >> $GITHUB_OUTPUT
+            echo "Already up-to-date"
+          fi
+
+          # Calculate version
+          BASE_VERSION="${UPSTREAM_TAG#v}"
+          RELEASES=$(gh release list --json tagName -q '.[].tagName' || echo "")
+          EXISTING=$(echo "$RELEASES" | grep -cF "v${BASE_VERSION}+brian." || echo "0")
+          EXISTING=$(echo "$EXISTING" | tr -d '[:space:]')
+          PATCH_NUM=$((EXISTING + 1))
+
+          VERSION="${BASE_VERSION}+brian.${PATCH_NUM}"
+          TAG="v${VERSION}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Will create release: $TAG"
+
+  prepare:
+    name: Prepare source with patches
+    needs: check
+    if: needs.check.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork (for patches.json5)
+        uses: actions/checkout@v4
+        with:
+          path: fork
+
+      - name: Checkout upstream at tag
+        uses: actions/checkout@v4
+        with:
+          repository: anomalyco/opencode
+          ref: ${{ needs.check.outputs.upstream_tag }}
+          path: upstream
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config --global user.email "actions@github.com"
+          git config --global user.name "github-actions[bot]"
+
+      - name: Apply patches from patches.json5
+        working-directory: upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Parse patches.json5 (extract PR numbers)
+          PATCHES=$(grep -oP '"pr":\s*\K\d+' ../fork/patches.json5 || echo "")
+
+          if [ -z "$PATCHES" ]; then
+            echo "No patches to apply"
+            exit 0
+          fi
+
+          echo "Patches to apply: $PATCHES"
+
+          for PR in $PATCHES; do
+            echo "🍒 Applying PR #$PR..."
+            
+            # Get non-merge commits from PR (exclude commits with 2+ parents)
+            COMMITS=$(gh api "repos/anomalyco/opencode/pulls/$PR/commits" \
+              --jq '[.[] | select(.parents | length == 1) | .sha]' || echo "[]")
+            
+            if [ "$COMMITS" = "[]" ] || [ "$COMMITS" = "" ]; then
+              echo "   ⚠️ No commits found for PR #$PR, skipping"
+              continue
+            fi
+            
+            echo "   Commits: $COMMITS"
+            
+            # Fetch and cherry-pick each commit
+            for SHA in $(echo "$COMMITS" | jq -r '.[]'); do
+              echo "   Cherry-picking $SHA..."
+              git fetch https://github.com/anomalyco/opencode.git $SHA
+              git cherry-pick --no-commit $SHA
+            done
+            
+            # Commit the patch
+            git commit -m "patch: PR #$PR" --allow-empty
+            echo "   ✅ Applied PR #$PR"
+          done
+
+      - name: Upload patched source
+        uses: actions/upload-artifact@v4
+        with:
+          name: patched-source
+          path: upstream
+          retention-days: 1
+
+  build:
+    name: Build CLI (${{ matrix.target }})
+    needs: [check, prepare]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            os: ubuntu-latest
+          - target: linux-arm64
+            os: ubuntu-latest
+          - target: darwin-arm64
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Download patched source
+        uses: actions/download-artifact@v4
+        with:
+          name: patched-source
+          path: .
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Configure git
+        run: |
+          git config --global user.email "actions@github.com"
+          git config --global user.name "github-actions[bot]"
+
+      - name: Build CLI binary
+        env:
+          OPENCODE_VERSION: ${{ needs.check.outputs.version }}
+          OPENCODE_CHANNEL: latest
+        run: |
+          echo "Building with OPENCODE_VERSION=$OPENCODE_VERSION"
+          cd packages/opencode
+          bun script/build.ts
+
+      - name: Package artifacts
+        run: |
+          cd packages/opencode/dist
+          for dir in */; do
+            if [ -d "$dir" ]; then
+              NAME="${dir%/}"
+              if [[ "$NAME" == *"${{ matrix.target }}"* ]]; then
+                if [[ "$NAME" == *"linux"* ]]; then
+                  tar -czf "${NAME}.tar.gz" -C "$NAME/bin" .
+                else
+                  (cd "$NAME/bin" && zip -r "../../${NAME}.zip" .)
+                fi
+              fi
+            fi
+          done
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode-${{ matrix.target }}
+          path: |
+            packages/opencode/dist/*.tar.gz
+            packages/opencode/dist/*.zip
+
+  release:
+    name: Create release
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork (for patches.json5)
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          pattern: opencode-*
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist/
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.check.outputs.version }}
+          TAG: ${{ needs.check.outputs.tag }}
+          UPSTREAM_TAG: ${{ needs.check.outputs.upstream_tag }}
+        run: |
+          # Read patches for release notes
+          PRS=$(grep -oP '"pr":\s*\K\d+' patches.json5 | tr '\n' ' ' || echo "")
+
+          # Prepare release notes
+          NOTES="## Fork Release
+
+          Based on upstream [\`${UPSTREAM_TAG}\`](https://github.com/anomalyco/opencode/releases/tag/${UPSTREAM_TAG})
+
+          ### Patches applied"
+
+          if [ -n "$PRS" ]; then
+            for PR in $PRS; do
+              NOTES="${NOTES}
+          - [PR #${PR}](https://github.com/anomalyco/opencode/pull/${PR})"
+            done
+          else
+            NOTES="${NOTES}
+          None"
+          fi
+
+          NOTES="${NOTES}
+
+          ### Installation
+
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/make-it-mine/install.sh | bash
+          \`\`\`
+          "
+
+          # Create release
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes "$NOTES" \
+            dist/*.tar.gz dist/*.zip
+
+          echo "✅ Release created: $TAG"
+
+  notify-failure:
+    name: Open issue on failure
+    needs: [check, prepare, build, release]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_TAG: ${{ needs.check.outputs.upstream_tag }}
+        run: |
+          TITLE="Release failed: $UPSTREAM_TAG"
+          BODY="## Release Failure Report
+
+          **Upstream tag:** \`$UPSTREAM_TAG\`
+          **Workflow run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          ### Next steps
+          1. Review the workflow logs
+          2. Check if patches in patches.json5 have conflicts
+          3. Fix and push to make-it-mine
+          "
+
+          EXISTING=$(gh issue list --search "Release failed: $UPSTREAM_TAG" --state open --json number -q '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "Release failed again. See: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          else
+            gh issue create --title "$TITLE" --body "$BODY" --label "release-failure"
+          fi
