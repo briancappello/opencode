@@ -143,8 +143,14 @@ async function getPrInfo(pr: number): Promise<PrInfo | null> {
 }
 
 async function getPrCommits(pr: number): Promise<string[]> {
-  // Get the list of commit SHAs from the PR (excludes merge commits from base branch)
-  const result = await exec(["gh", "api", `repos/anomalyco/opencode/pulls/${pr}/commits`, "--jq", "[.[] | .sha]"])
+  // Get the list of commit SHAs from the PR, excluding merge commits (those with 2+ parents)
+  const result = await exec([
+    "gh",
+    "api",
+    `repos/anomalyco/opencode/pulls/${pr}/commits`,
+    "--jq",
+    "[.[] | select(.parents | length == 1) | .sha]",
+  ])
   if (result.exitCode !== 0 || !result.stdout) return []
   try {
     return JSON.parse(result.stdout)
