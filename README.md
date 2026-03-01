@@ -1,3 +1,30 @@
+> **This is a customized fork of [anomalyco/opencode](https://github.com/anomalyco/opencode).**
+>
+> This fork tracks upstream releases and applies additional patches from unmerged PRs.
+> See [`patches.json5`](./patches.json5) for the list of applied patches.
+>
+> ### Install this fork
+>
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/briancappello/opencode/make-it-mine/install.sh | bash
+> ```
+>
+> ### How it works
+>
+> 1. A daily GitHub Action checks for new upstream releases
+> 2. When found, it rebases `make-it-mine` onto the new tag and cherry-picks patches from `patches.json5`
+> 3. If tests pass, a new release is created (e.g., `v0.3.17+brian.1`)
+> 4. The auto-updater will automatically install new fork releases
+>
+> ### Customize this fork
+>
+> 1. Clone this repo and checkout `make-it-mine`
+> 2. Edit `patches.json5` to add/remove upstream PR numbers
+> 3. Commit and push to trigger a new release
+> 4. Your running installation will auto-update to the new release
+
+---
+
 <p align="center">
   <a href="https://opencode.ai">
     <picture>
