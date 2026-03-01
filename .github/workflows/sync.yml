@@ -1,6 +1,9 @@
 name: sync
 
 on:
+  push:
+    branches:
+      - make-it-mine
   schedule:
     # Run daily at 8:00 UTC
     - cron: "0 8 * * *"
@@ -23,6 +26,8 @@ permissions:
 jobs:
   check:
     name: Check for upstream updates
+    # Skip if this push was made by the sync workflow itself (prevents infinite loop)
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     outputs:
       should_sync: ${{ steps.check.outputs.should_sync }}

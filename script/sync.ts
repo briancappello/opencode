@@ -142,6 +142,17 @@ async function getPrInfo(pr: number): Promise<PrInfo | null> {
   }
 }
 
+async function getPrCommits(pr: number): Promise<string[]> {
+  // Get the list of commit SHAs from the PR (excludes merge commits from base branch)
+  const result = await exec(["gh", "api", `repos/anomalyco/opencode/pulls/${pr}/commits`, "--jq", "[.[] | .sha]"])
+  if (result.exitCode !== 0 || !result.stdout) return []
+  try {
+    return JSON.parse(result.stdout)
+  } catch {
+    return []
+  }
+}
+
 async function cherryPickPr(pr: number): Promise<{ success: boolean; error?: string }> {
   const info = await getPrInfo(pr)
   if (!info) {
@@ -169,31 +180,34 @@ async function cherryPickPr(pr: number): Promise<{ success: boolean; error?: str
     return { success: true }
   }
 
-  // For open PRs, fetch the PR branch and cherry-pick all its commits
-  console.log(`   Fetching PR #${pr} branch...`)
-  const fetchResult = await $`git fetch upstream pull/${pr}/head:pr-${pr}`.cwd(root).nothrow().quiet()
-  if (fetchResult.exitCode !== 0) {
-    return { success: false, error: `Failed to fetch PR #${pr} branch` }
+  // For open PRs, get the actual commit SHAs from the PR and cherry-pick each
+  console.log(`   Fetching PR #${pr} commits...`)
+  const commits = await getPrCommits(pr)
+  if (commits.length === 0) {
+    return { success: false, error: `Could not fetch commits for PR #${pr}` }
+  }
+  console.log(`   Found ${commits.length} commits to cherry-pick`)
+
+  // Fetch all the commits
+  for (const sha of commits) {
+    await $`git fetch upstream ${sha}`.cwd(root).nothrow().quiet()
   }
 
   if (dryRun) {
-    console.log(`[dry-run] git cherry-pick pr-${pr}~${info.commits}..pr-${pr} (PR #${pr}, open)`)
+    console.log(`[dry-run] git cherry-pick ${commits.join(" ")} (PR #${pr}, open)`)
     return { success: true }
   }
 
-  // Cherry-pick all commits from the PR
-  // We use the commit range from the PR's base to its head
-  const result = await exec(["git", "cherry-pick", "--no-commit", `pr-${pr}~${info.commits}..pr-${pr}`])
-  if (result.exitCode !== 0) {
-    await $`git cherry-pick --abort`.cwd(root).nothrow().quiet()
-    return { success: false, error: result.stderr || "Cherry-pick failed" }
+  // Cherry-pick each commit individually with --no-commit to squash them
+  for (const sha of commits) {
+    const result = await exec(["git", "cherry-pick", "--no-commit", sha])
+    if (result.exitCode !== 0) {
+      await $`git cherry-pick --abort`.cwd(root).nothrow().quiet()
+      return { success: false, error: `Failed to cherry-pick ${sha}: ${result.stderr}` }
+    }
   }
 
   await $`git commit -m ${"patch: PR #" + pr}`.cwd(root).quiet()
-
-  // Clean up the temporary branch
-  await $`git branch -D pr-${pr}`.cwd(root).nothrow().quiet()
-
   return { success: true }
 }
 

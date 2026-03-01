@@ -1,9 +1,8 @@
 name: fork-release
 
 on:
-  push:
-    branches:
-      - make-it-mine
+  # Only triggered by sync workflow or manual dispatch - not on push
+  # The sync workflow applies patches from patches.json5 before triggering this
   workflow_dispatch:
     inputs:
       upstream_tag:
